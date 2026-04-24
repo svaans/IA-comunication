@@ -102,7 +102,7 @@ def is_cursor_usage_exhausted(result: dict[str, Any]) -> bool:
 
 
 def _result_from_proc(
-    proc: subprocess.CompletedProcess[str],
+    proc: Any,
     cmd: list[str],
     resolved: str,
 ) -> dict[str, Any]:
@@ -178,17 +178,19 @@ def run_cursor_agent(
     use_file = os.environ.get("CURSOR_AGENT_USE_FILE", "").lower() in ("1", "true", "yes")
     use_stdin = os.environ.get("CURSOR_AGENT_USE_STDIN", "0").lower() in ("1", "true", "yes")
 
-    cmd: list[str] = [resolved]
+    trust_prefix: list[str] = []
     if _env_truthy("CURSOR_AGENT_TRUST_WORKSPACE", "1") and not _extra_has_trust_or_yolo(extra_list):
         trust_raw = os.environ.get("CURSOR_AGENT_TRUST_FLAGS", "--trust").strip()
         if trust_raw:
             try:
-                cmd.extend(shlex.split(trust_raw, posix=os.name == "posix"))
+                trust_prefix.extend(shlex.split(trust_raw, posix=os.name == "posix"))
             except ValueError:
                 logger.warning("CURSOR_AGENT_TRUST_FLAGS no se pudo parsear; omitiendo inyección de confianza")
-    cmd.extend(extra_list)
+
     stdin_val: str | None = None
     tmp_path: Path | None = None
+    tail: list[str] = []
+    last_cmd: list[str] = [resolved]
 
     try:
         if use_file:
@@ -197,15 +199,20 @@ def run_cursor_agent(
             with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write(instruction)
             flag = os.environ.get("CURSOR_AGENT_FILE_FLAG", "--prompt-file").strip() or "--prompt-file"
-            cmd.extend([flag, str(tmp_path)])
+            tail = [flag, str(tmp_path)]
         elif use_stdin:
             stdin_val = instruction
         else:
-            cmd.append(instruction)
+            tail = [instruction]
+
+        def build_cmd(model_args: list[str]) -> list[str]:
+            return [resolved] + trust_prefix + model_args + extra_list + tail
 
         logger.info("Ejecutando Cursor Agent: cwd=%s exe=%s", cwd, resolved)
-        proc = subprocess.run(
-            cmd,
+        cmd0 = build_cmd([])
+        last_cmd = cmd0
+        proc0 = subprocess.run(
+            cmd0,
             cwd=str(cwd),
             input=stdin_val,
             capture_output=True,
@@ -213,34 +220,54 @@ def run_cursor_agent(
             timeout=timeout,
             shell=False,
         )
-        err_msg: str | None = None
-        if proc.returncode != 0:
-            err_msg = (proc.stderr or "").strip() or (proc.stdout or "").strip()
-            if not err_msg:
-                err_msg = f"exit status {proc.returncode}"
-            else:
-                err_msg = err_msg[:8000]
-            logger.warning(
-                "Cursor Agent terminó con código %s. stderr (primeras 2k): %s",
-                proc.returncode,
-                (proc.stderr or "")[:2000],
+        res0 = _result_from_proc(proc0, cmd0, resolved)
+        if res0.get("ok"):
+            return res0
+
+        want_fb = _env_truthy("CURSOR_AGENT_AUTO_MODEL_FALLBACK", "1")
+        head_for_model_check = [resolved] + trust_prefix + extra_list
+        if (
+            want_fb
+            and is_cursor_usage_exhausted(res0)
+            and not _argv_has_explicit_model(head_for_model_check)
+        ):
+            auto_name = os.environ.get("CURSOR_AGENT_AUTO_MODEL_NAME", "auto").strip() or "auto"
+            model_args = ["--model", auto_name]
+            cmd1 = build_cmd(model_args)
+            last_cmd = cmd1
+            logger.info(
+                "Reintentando Cursor Agent con --model %s (cuota del modelo actual / mensaje Switch to Auto).",
+                auto_name,
             )
-        return {
-            "ok": proc.returncode == 0,
-            "returncode": proc.returncode,
-            "stdout": proc.stdout or "",
-            "stderr": proc.stderr or "",
-            "command": cmd,
-            "executable_resolved": resolved,
-            "error": err_msg,
-        }
+            proc1 = subprocess.run(
+                cmd1,
+                cwd=str(cwd),
+                input=stdin_val,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                shell=False,
+            )
+            res1 = _result_from_proc(proc1, cmd1, resolved)
+            if res1.get("ok"):
+                res1["model_fallback"] = auto_name
+                res1["note"] = (
+                    f"Se aplicó automáticamente `--model {auto_name}` tras límite de uso del modelo por defecto."
+                )
+                logger.info(
+                    "Cursor Agent OK tras fallback de modelo (--model %s).",
+                    auto_name,
+                )
+            return res1
+
+        return res0
     except subprocess.TimeoutExpired as e:
         return {
             "ok": False,
             "returncode": -124,
             "stdout": (e.stdout or "") if isinstance(e.stdout, str) else "",
             "stderr": (e.stderr or "") if isinstance(e.stderr, str) else "",
-            "command": cmd,
+            "command": last_cmd,
             "executable_resolved": resolved,
             "error": f"timeout after {timeout}s",
         }
@@ -258,7 +285,7 @@ def run_cursor_agent(
             "returncode": -1,
             "stdout": "",
             "stderr": "",
-            "command": cmd,
+            "command": last_cmd,
             "executable_resolved": resolved,
             "error": err,
         }

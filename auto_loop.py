@@ -260,6 +260,8 @@ def main(argv: list[str] | None = None) -> int:
                     "skipped": cursor_result.get("skipped"),
                     "reason": cursor_result.get("reason"),
                     "returncode": cursor_result.get("returncode"),
+                    "model_fallback": cursor_result.get("model_fallback"),
+                    "note": cursor_result.get("note"),
                     "stdout": truncate_text(cursor_result.get("stdout") or "", 8000),
                     "stderr": truncate_text(cursor_result.get("stderr") or "", 8000),
                     "error": cursor_result.get("error"),
