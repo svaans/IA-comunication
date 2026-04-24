@@ -213,6 +213,30 @@ def extract_risks_bullets(risks_text: str) -> list[str]:
     return [x for x in lines if x][:50]
 
 
+def _gemini_http_error_summary(resp: Any) -> tuple[str, str]:
+    """
+    Devuelve (mensaje_corto, cuerpo_detalle) a partir de una respuesta HTTP de error.
+    No incluye secretos; solo texto devuelto por la API.
+    """
+    code = getattr(resp, "status_code", "?")
+    raw = (getattr(resp, "text", None) or "")[:8000]
+    try:
+        data = resp.json()
+        err = data.get("error") if isinstance(data, dict) else None
+        if isinstance(err, dict):
+            msg = (err.get("message") or "").strip()
+            status = (err.get("status") or "").strip()
+            if msg:
+                bits = [f"HTTP {code}"]
+                if status:
+                    bits.append(status)
+                bits.append(msg)
+                return (": ".join(bits), raw)
+    except (json.JSONDecodeError, TypeError, AttributeError, ValueError):
+        pass
+    return (f"HTTP {code}", raw)
+
+
 def call_gemini(
     user_prompt: str,
     *,
@@ -248,11 +272,12 @@ def call_gemini(
         logger.exception("Error de red al llamar a Gemini")
         return {"ok": False, "error": str(e), "text": "", "parsed": parse_supervisor_response("")}
     if resp.status_code != 200:
-        logger.error("Gemini HTTP %s: %s", resp.status_code, resp.text[:2000])
+        summary, detail = _gemini_http_error_summary(resp)
+        logger.error("Gemini %s | cuerpo: %s", summary, resp.text[:2000])
         return {
             "ok": False,
-            "error": f"HTTP {resp.status_code}",
-            "detail": resp.text[:8000],
+            "error": summary,
+            "detail": detail,
             "text": "",
             "parsed": parse_supervisor_response(""),
         }

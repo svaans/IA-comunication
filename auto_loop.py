@@ -127,6 +127,7 @@ def main(argv: list[str] | None = None) -> int:
 
     state = load_state()
     iteration_done = 0
+    cycles_this_run = 0
 
     try:
         n = 0
@@ -138,6 +139,7 @@ def main(argv: list[str] | None = None) -> int:
                 break
 
             n += 1
+            cycles_this_run += 1
             iteration = int(state.get("iteration", 0) or 0) + 1
             state["iteration"] = iteration
             state["status"] = "running"
@@ -154,7 +156,17 @@ def main(argv: list[str] | None = None) -> int:
             if not gemini_out.get("ok"):
                 state["status"] = "gemini_error"
                 state["last_instruction"] = ""
-                state["open_risks"] = state.get("open_risks") or []
+                risks = list(state.get("open_risks") or [])
+                err_l = (gemini_out.get("error") or "").lower()
+                if "leaked" in err_l:
+                    tip = (
+                        "Google marcó GEMINI_API_KEY como filtrada o revocada: crea una clave nueva "
+                        "en Google AI Studio, actualiza `.env` y revoca la antigua. No reutilices claves "
+                        "pegadas en chats, issues o repos públicos."
+                    )
+                    if tip not in risks:
+                        risks.insert(0, tip)
+                state["open_risks"] = risks
                 state["last_cursor_result"] = _compact_for_state(
                     "cursor_skipped",
                     {"skipped": True, "reason": "gemini_error"},
@@ -263,7 +275,11 @@ def main(argv: list[str] | None = None) -> int:
         log.info("Interrupción por teclado.")
         return 130
 
-    log.info("Bucle terminado (última iteración registrada: %s).", iteration_done)
+    log.info(
+        "Bucle terminado (ciclos en esta ejecución: %s; último id de iteración en estado: %s).",
+        cycles_this_run,
+        iteration_done,
+    )
     return 0
 
 
