@@ -16,6 +16,16 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
+def _env_truthy(name: str, default: str = "0") -> bool:
+    v = os.environ.get(name, default).strip().lower()
+    return v in ("1", "true", "yes", "on")
+
+
+def _extra_has_trust_or_yolo(extra: list[str]) -> bool:
+    blob = " ".join(extra).lower()
+    return "--trust" in blob or "--yolo" in blob
+
+
 def _env_int(name: str, default: int) -> int:
     raw = os.environ.get(name)
     if raw is None or not str(raw).strip():
@@ -78,6 +88,8 @@ def run_cursor_agent(
     - CURSOR_AGENT_USE_STDIN: si "1", envía la instrucción por stdin (default "0")
     - CURSOR_AGENT_USE_FILE: si "1", escribe la instrucción en un archivo temporal y pasa su ruta
     - CURSOR_AGENT_FILE_FLAG: flag antes de la ruta (default: --prompt-file)
+    - CURSOR_AGENT_TRUST_WORKSPACE: si "1" (default), añade flags de confianza del workspace para modo no interactivo
+    - CURSOR_AGENT_TRUST_FLAGS: argumentos de confianza (default: --trust). Solo se añaden si no vienen ya en EXTRA_ARGS
     - CURSOR_TIMEOUT_SEC: timeout de la ejecución
     """
     timeout = timeout_sec or _env_int("CURSOR_TIMEOUT_SEC", 3600)
@@ -109,7 +121,15 @@ def run_cursor_agent(
     use_file = os.environ.get("CURSOR_AGENT_USE_FILE", "").lower() in ("1", "true", "yes")
     use_stdin = os.environ.get("CURSOR_AGENT_USE_STDIN", "0").lower() in ("1", "true", "yes")
 
-    cmd: list[str] = [resolved] + extra_list
+    cmd: list[str] = [resolved]
+    if _env_truthy("CURSOR_AGENT_TRUST_WORKSPACE", "1") and not _extra_has_trust_or_yolo(extra_list):
+        trust_raw = os.environ.get("CURSOR_AGENT_TRUST_FLAGS", "--trust").strip()
+        if trust_raw:
+            try:
+                cmd.extend(shlex.split(trust_raw, posix=os.name == "posix"))
+            except ValueError:
+                logger.warning("CURSOR_AGENT_TRUST_FLAGS no se pudo parsear; omitiendo inyección de confianza")
+    cmd.extend(extra_list)
     stdin_val: str | None = None
     tmp_path: Path | None = None
 
