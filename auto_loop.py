@@ -170,6 +170,20 @@ def main(argv: list[str] | None = None) -> int:
                     )
                     if tip not in risks:
                         risks.insert(0, tip)
+                elif (
+                    "resource_exhausted" in err_l
+                    or "exceeded your current quota" in err_l
+                    or "quota exceeded" in err_l
+                ):
+                    tried = gemini_out.get("models_tried")
+                    tried_s = ", ".join(tried) if isinstance(tried, list) and tried else "(desconocido)"
+                    tip = (
+                        f"Gemini: cuota o límite (429) tras probar modelos: {tried_s}. "
+                        "Revisa el plan en Google AI Studio, ajusta GEMINI_MODEL / GEMINI_MODEL_FALLBACKS, "
+                        "o espera la ventana de rate limit."
+                    )
+                    if tip not in risks:
+                        risks.insert(0, tip)
                 state["open_risks"] = risks
                 state["last_cursor_result"] = _compact_for_state(
                     "cursor_skipped",

@@ -8,6 +8,7 @@ import json
 import logging
 import os
 import re
+import time
 from pathlib import Path
 from typing import Any
 
@@ -238,50 +239,88 @@ def _gemini_http_error_summary(resp: Any) -> tuple[str, str]:
     return (f"HTTP {code}", raw)
 
 
-def call_gemini(
-    user_prompt: str,
-    *,
-    api_key: str | None = None,
-    model: str | None = None,
-    timeout_sec: int | None = None,
-) -> dict[str, Any]:
-    load_dotenv()
-    key = api_key or os.environ.get("GEMINI_API_KEY")
-    if not key:
-        raise ValueError("Falta GEMINI_API_KEY en el entorno o en .env")
-    mdl = model or os.environ.get("GEMINI_MODEL", "gemini-2.5-flash-lite")
-    timeout = timeout_sec or _env_int("GEMINI_TIMEOUT_SEC", 120)
-    base = os.environ.get(
-        "GEMINI_API_BASE",
-        "https://generativelanguage.googleapis.com",
-    ).rstrip("/")
-    url = f"{base}/v1beta/models/{mdl}:generateContent"
-    payload = {
-        "systemInstruction": {"parts": [{"text": SYSTEM_INSTRUCTION}]},
-        "contents": [{"role": "user", "parts": [{"text": user_prompt}]}],
-    }
-    logger.info("Llamando a Gemini model=%s timeout=%ss", mdl, timeout)
+def _models_chain(primary_override: str | None) -> list[str]:
+    """
+    Lista ordenada de modelos: primario + fallbacks desde GEMINI_MODEL_FALLBACKS.
+    Si GEMINI_MODEL_FALLBACKS no está definido, usa una cadena por defecto razonable.
+    Si está vacío o es 0/false/none, solo se usa el modelo primario.
+    """
+    primary = (
+        (primary_override or os.environ.get("GEMINI_MODEL", "gemini-2.5-flash-lite") or "")
+        .strip()
+    )
+    raw = os.environ.get("GEMINI_MODEL_FALLBACKS")
+    if raw is None:
+        raw = "gemini-2.0-flash,gemini-1.5-flash"
+    raw_st = raw.strip()
+    if raw_st.lower() in ("0", "false", "none", ""):
+        fallbacks: list[str] = []
+    else:
+        fallbacks = [p.strip() for p in raw_st.split(",") if p.strip()]
+    out: list[str] = []
+    for m in [primary] + fallbacks:
+        if m and m not in out:
+            out.append(m)
+    return out or ["gemini-2.5-flash-lite"]
+
+
+def _gemini_is_leaked_key(status: int, summary: str) -> bool:
+    if status != 403:
+        return False
+    s = summary.lower()
+    return "leaked" in s
+
+
+def _gemini_should_try_next_model(status: int, summary: str) -> bool:
+    """429 cuota, 404 modelo, 503 temporal, u error de modelo en 400."""
+    if status in (404, 429, 503):
+        return True
+    msg = summary.lower()
+    if status == 400 and "model" in msg and ("not found" in msg or "invalid" in msg):
+        return True
+    return False
+
+
+def _parse_duration_seconds(val: Any) -> float | None:
+    if isinstance(val, (int, float)):
+        return float(val)
+    if not isinstance(val, str):
+        return None
+    s = val.strip()
+    if s.endswith("s"):
+        s = s[:-1].strip()
     try:
-        resp = requests.post(
-            url,
-            params={"key": key},
-            json=payload,
-            timeout=timeout,
-            headers={"Content-Type": "application/json"},
-        )
-    except requests.RequestException as e:
-        logger.exception("Error de red al llamar a Gemini")
-        return {"ok": False, "error": str(e), "text": "", "parsed": parse_supervisor_response("")}
-    if resp.status_code != 200:
-        summary, detail = _gemini_http_error_summary(resp)
-        logger.error("Gemini %s | cuerpo: %s", summary, resp.text[:2000])
-        return {
-            "ok": False,
-            "error": summary,
-            "detail": detail,
-            "text": "",
-            "parsed": parse_supervisor_response(""),
-        }
+        return float(s)
+    except ValueError:
+        return None
+
+
+def _gemini_parse_retry_delay_seconds(resp: Any) -> float | None:
+    """Intenta leer RetryInfo o el texto 'Please retry in Xs' del cuerpo JSON."""
+    try:
+        data = resp.json()
+        details = (data.get("error") or {}).get("details") or []
+        for d in details:
+            if not isinstance(d, dict):
+                continue
+            if str(d.get("@type", "")).endswith("RetryInfo"):
+                rd = d.get("retryDelay") or d.get("retry_delay")
+                parsed = _parse_duration_seconds(rd)
+                if parsed is not None:
+                    return parsed
+    except (json.JSONDecodeError, TypeError, ValueError, AttributeError):
+        pass
+    try:
+        text = (getattr(resp, "text", None) or "")[:8000]
+        m = re.search(r"please retry in\s+([\d.]+)\s*s", text, re.IGNORECASE)
+        if m:
+            return float(m.group(1))
+    except (TypeError, ValueError):
+        return None
+    return None
+
+
+def _gemini_ok_response(resp: Any, model_used: str) -> dict[str, Any]:
     try:
         data = resp.json()
     except json.JSONDecodeError:
@@ -299,7 +338,121 @@ def call_gemini(
         text = ""
     parsed = parse_supervisor_response(text)
     parsed["raw"] = text
-    return {"ok": True, "text": text, "parsed": parsed, "raw_response": data}
+    out: dict[str, Any] = {
+        "ok": True,
+        "text": text,
+        "parsed": parsed,
+        "raw_response": data,
+        "model_used": model_used,
+    }
+    return out
+
+
+def call_gemini(
+    user_prompt: str,
+    *,
+    api_key: str | None = None,
+    model: str | None = None,
+    timeout_sec: int | None = None,
+) -> dict[str, Any]:
+    load_dotenv()
+    key = api_key or os.environ.get("GEMINI_API_KEY")
+    if not key:
+        raise ValueError("Falta GEMINI_API_KEY en el entorno o en .env")
+    timeout = timeout_sec or _env_int("GEMINI_TIMEOUT_SEC", 120)
+    base = os.environ.get(
+        "GEMINI_API_BASE",
+        "https://generativelanguage.googleapis.com",
+    ).rstrip("/")
+    models = _models_chain(model)
+    payload = {
+        "systemInstruction": {"parts": [{"text": SYSTEM_INSTRUCTION}]},
+        "contents": [{"role": "user", "parts": [{"text": user_prompt}]}],
+    }
+    last: dict[str, Any] | None = None
+    sleep_cap = _env_int("GEMINI_429_RETRY_MAX_SLEEP_SEC", 60)
+    do_sleep = os.environ.get("GEMINI_429_SLEEP_BEFORE_FALLBACK", "0").strip().lower() in (
+        "1",
+        "true",
+        "yes",
+        "on",
+    )
+
+    for idx, mdl in enumerate(models):
+        url = f"{base}/v1beta/models/{mdl}:generateContent"
+        logger.info(
+            "Llamando a Gemini model=%s (%s/%s) timeout=%ss",
+            mdl,
+            idx + 1,
+            len(models),
+            timeout,
+        )
+        try:
+            resp = requests.post(
+                url,
+                params={"key": key},
+                json=payload,
+                timeout=timeout,
+                headers={"Content-Type": "application/json"},
+            )
+        except requests.RequestException as e:
+            logger.exception("Error de red al llamar a Gemini")
+            return {
+                "ok": False,
+                "error": str(e),
+                "text": "",
+                "parsed": parse_supervisor_response(""),
+                "models_tried": models[: idx + 1],
+            }
+
+        if resp.status_code == 200:
+            ok_out = _gemini_ok_response(resp, mdl)
+            if idx > 0:
+                ok_out["model_fallback_from"] = models[0]
+                logger.info(
+                    "Gemini OK con modelo de respaldo %s (el primario %s no estaba disponible o agotó cuota).",
+                    mdl,
+                    models[0],
+                )
+            return ok_out
+
+        summary, detail = _gemini_http_error_summary(resp)
+        last = {
+            "ok": False,
+            "error": summary,
+            "detail": detail,
+            "text": "",
+            "parsed": parse_supervisor_response(""),
+            "models_tried": models[: idx + 1],
+        }
+
+        if _gemini_is_leaked_key(resp.status_code, summary):
+            logger.error("Gemini %s | no se aplican más modelos de respaldo.", summary)
+            return last
+
+        if _gemini_should_try_next_model(resp.status_code, summary) and idx < len(models) - 1:
+            logger.warning(
+                "Gemini rechazó el modelo %s (%s). Probando el siguiente de la cadena…",
+                mdl,
+                summary.split("\n")[0][:200],
+            )
+            if do_sleep and resp.status_code == 429:
+                delay = _gemini_parse_retry_delay_seconds(resp)
+                if delay is not None and delay > 0:
+                    wait = min(delay + 0.5, float(sleep_cap))
+                    logger.info("Esperando %.1fs (429) antes del siguiente modelo…", wait)
+                    time.sleep(wait)
+            continue
+
+        logger.error("Gemini %s | cuerpo: %s", summary, resp.text[:2000])
+        return last
+
+    return last or {
+        "ok": False,
+        "error": "sin modelos en la cadena",
+        "text": "",
+        "parsed": parse_supervisor_response(""),
+    }
 
 
 def compose_cursor_instruction(parsed: dict[str, Any]) -> str:
