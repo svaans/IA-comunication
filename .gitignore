@@ -1,0 +1,18 @@
+# Entorno
+.env
+venv/
+
+# Python
+__pycache__/
+*.pyc
+
+# Logs y estado IA
+ai_logs/
+ai_reports/
+ai_state/
+
+# Archivos temporales
+*.log
+
+# Imágenes no necesarias
+*.png
