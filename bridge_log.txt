@@ -1,0 +1,8 @@
+[2026-04-23 05:29:33] Script iniciado.
+[2026-04-23 05:29:33] Archivo de log: C:\Users\santi\OneDrive\Documentos\operador\bridge_log.txt
+[2026-04-23 05:29:33] Archivo de config: C:\Users\santi\OneDrive\Documentos\operador\bridge_config.json
+[2026-04-23 05:29:33] Bridge loop iniciado.
+[2026-04-23 05:31:00] DETENCIÓN solicitada por hotkey.
+[2026-04-23 05:31:00] Esperando salida limpia...
+[2026-04-23 05:31:00] Bridge loop finalizado.
+[2026-04-23 05:31:00] Programa terminado.
