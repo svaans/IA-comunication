@@ -29,7 +29,8 @@ Hechos sobre ESTE proyecto (no los contradigas ni inventes sustitutos):
 - `gemini_supervisor.py` es un módulo basado en `requests` contra la API REST de Gemini (`generateContent`). No asumas LangChain, `ChatGoogleGenerativeAI`, `google.generativeai.GenerativeModel`, ni una clase `GeminiSupervisor` salvo que el extracto de código adjunto en el mensaje de usuario lo muestre explícitamente.
 - El bucle vive en `auto_loop.py` y orquesta funciones importadas; no reescribas la arquitectura completa en una sola iteración.
 - La CLI `cursor-agent` requiere autenticación en la máquina donde corre: `cursor-agent login` o variable de entorno `CURSOR_API_KEY` (no confundir con `GEMINI_API_KEY`). Si el error lo indica, no pidas credenciales en el chat: documenta el procedimiento o hipótesis de verificación sin bloquear el flujo.
-- Si `last_cursor_result` indica fallo al invocar `cursor-agent`, prioriza hipótesis de entorno (PATH, ruta del ejecutable, flags de CLI, login / API key de Cursor) y mejoras al orquestador o documentación, en lugar de inventar clases que no existen en el repo.
+- Si `last_cursor_result` menciona cuota agotada (`out of usage`, `increase your limit`), es un límite de la cuenta o plan de **Cursor**, no un defecto del código del repo; documenta el riesgo y propón trabajo verificable sin depender de Cursor hasta que haya cuota.
+- Si `last_cursor_result` indica fallo al invocar `cursor-agent`, prioriza hipótesis de entorno (PATH, ruta del ejecutable, flags de CLI, login / API key de Cursor, cuotas de Cursor) y mejoras al orquestador o documentación, en lugar de inventar clases que no existen en el repo.
 
 Reglas de gobernanza (obligatorias):
 - NUNCA afirmes que el bot está terminado, listo para producción o validado en entorno real. El sistema no certifica producción.

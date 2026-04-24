@@ -26,6 +26,13 @@ def _extra_has_trust_or_yolo(extra: list[str]) -> bool:
     return "--trust" in blob or "--yolo" in blob
 
 
+def _argv_has_explicit_model(argv: list[str]) -> bool:
+    for tok in argv:
+        if tok == "--model" or tok.startswith("--model="):
+            return True
+    return False
+
+
 def _env_int(name: str, default: int) -> int:
     raw = os.environ.get(name)
     if raw is None or not str(raw).strip():
@@ -74,6 +81,54 @@ def is_cursor_auth_failure(result: dict[str, Any]) -> bool:
     )
 
 
+def is_cursor_usage_exhausted(result: dict[str, Any]) -> bool:
+    """
+    Detecta respuesta de Cursor por cuota / límite de uso de la cuenta (no es un bug del repo).
+    """
+    parts = [
+        str(result.get("stderr") or ""),
+        str(result.get("stdout") or ""),
+        str(result.get("error") or ""),
+        str(result.get("truncated_json") or ""),
+    ]
+    blob = " ".join(parts).lower()
+    return (
+        "out of usage" in blob
+        or "you're out of usage" in blob
+        or "increase your limit" in blob
+        or "ask your admin to increase" in blob
+        or "switch to auto" in blob
+    )
+
+
+def _result_from_proc(
+    proc: subprocess.CompletedProcess[str],
+    cmd: list[str],
+    resolved: str,
+) -> dict[str, Any]:
+    err_msg: str | None = None
+    if proc.returncode != 0:
+        err_msg = (proc.stderr or "").strip() or (proc.stdout or "").strip()
+        if not err_msg:
+            err_msg = f"exit status {proc.returncode}"
+        else:
+            err_msg = err_msg[:8000]
+        logger.warning(
+            "Cursor Agent terminó con código %s. stderr (primeras 2k): %s",
+            proc.returncode,
+            (proc.stderr or "")[:2000],
+        )
+    return {
+        "ok": proc.returncode == 0,
+        "returncode": proc.returncode,
+        "stdout": proc.stdout or "",
+        "stderr": proc.stderr or "",
+        "command": cmd,
+        "executable_resolved": resolved,
+        "error": err_msg,
+    }
+
+
 def run_cursor_agent(
     instruction: str,
     cwd: Path,
@@ -90,6 +145,8 @@ def run_cursor_agent(
     - CURSOR_AGENT_FILE_FLAG: flag antes de la ruta (default: --prompt-file)
     - CURSOR_AGENT_TRUST_WORKSPACE: si "1" (default), añade flags de confianza del workspace para modo no interactivo
     - CURSOR_AGENT_TRUST_FLAGS: argumentos de confianza (default: --trust). Solo se añaden si no vienen ya en EXTRA_ARGS
+    - CURSOR_AGENT_AUTO_MODEL_FALLBACK: si "1" (default), ante cuota agotada / "Switch to Auto" reintenta con `--model <nombre>`
+    - CURSOR_AGENT_AUTO_MODEL_NAME: modelo de respaldo (default: auto)
     - CURSOR_TIMEOUT_SEC: timeout de la ejecución
     """
     timeout = timeout_sec or _env_int("CURSOR_TIMEOUT_SEC", 3600)

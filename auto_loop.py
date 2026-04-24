@@ -21,7 +21,11 @@ from typing import Any
 
 from dotenv import load_dotenv
 
-from cursor_executor import is_cursor_auth_failure, run_cursor_agent
+from cursor_executor import (
+    is_cursor_auth_failure,
+    is_cursor_usage_exhausted,
+    run_cursor_agent,
+)
 from gemini_supervisor import (
     build_user_prompt,
     call_gemini,
@@ -186,6 +190,7 @@ def main(argv: list[str] | None = None) -> int:
             state["last_instruction"] = truncate_text(instruction, max_chars=16000)
 
             skip_after_auth = _env_truthy("AUTO_LOOP_SKIP_CURSOR_AFTER_AUTH_ERROR", "0")
+            skip_after_usage = _env_truthy("AUTO_LOOP_SKIP_CURSOR_AFTER_USAGE_ERROR", "0")
             if args.skip_cursor:
                 cursor_result = {
                     "ok": True,
@@ -215,6 +220,25 @@ def main(argv: list[str] | None = None) -> int:
                     "error": None,
                     "reason": "cursor_agent_auth_required_previous_iteration",
                 }
+            elif (
+                skip_after_usage
+                and isinstance(cursor_prev, dict)
+                and is_cursor_usage_exhausted(cursor_prev)
+            ):
+                log.info(
+                    "Omitiendo Cursor Agent: la iteración anterior indicó cuota/uso agotado en Cursor "
+                    "(AUTO_LOOP_SKIP_CURSOR_AFTER_USAGE_ERROR=1). "
+                    "Revisa plan, modo Auto o límites del equipo en cursor.com."
+                )
+                cursor_result = {
+                    "ok": True,
+                    "skipped": True,
+                    "returncode": 0,
+                    "stdout": "",
+                    "stderr": "",
+                    "error": None,
+                    "reason": "cursor_agent_usage_exhausted_previous_iteration",
+                }
             else:
                 cursor_result = run_cursor_agent(instruction, root)
                 if not cursor_result.get("ok"):
@@ -223,6 +247,11 @@ def main(argv: list[str] | None = None) -> int:
                         cursor_result.get("returncode"),
                         (cursor_result.get("error") or "")[:1500],
                     )
+                    if is_cursor_usage_exhausted(cursor_result):
+                        log.warning(
+                            "Límite de uso de Cursor alcanzado (mensaje de la CLI). "
+                            "No es un fallo del repositorio: revisa tu cuenta/plan o pide más cuota al admin."
+                        )
 
             state["last_cursor_result"] = _compact_for_state(
                 "cursor",
@@ -243,6 +272,18 @@ def main(argv: list[str] | None = None) -> int:
             risks = extract_risks_bullets(str(parsed.get("risks") or ""))
             if risks:
                 state["open_risks"] = risks
+
+            if not cursor_result.get("ok") and is_cursor_usage_exhausted(cursor_result):
+                cur = list(state.get("open_risks") or [])
+                tip = (
+                    "Cursor Agent: cuota o uso de la cuenta Cursor agotado (mensaje tipo "
+                    "'out of usage' / 'increase your limit'). Revisa plan, 'Auto' o límites del equipo; "
+                    "opciones: `python auto_loop.py --skip-cursor`, o "
+                    "AUTO_LOOP_SKIP_CURSOR_AFTER_USAGE_ERROR=1 para seguir el bucle sin llamar a Cursor."
+                )
+                if tip not in cur:
+                    cur.insert(0, tip)
+                state["open_risks"] = cur
 
             if not cursor_result.get("ok"):
                 state["status"] = "cursor_error"
